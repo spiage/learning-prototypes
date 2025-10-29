@@ -119,6 +119,43 @@ public class GitRefs_Dir
         _heads.UpdateBranch(branchName, commitHash);
 }
 
+public class GitLogs_Dir
+{
+    private readonly string _path;
+
+    public GitLogs_Dir(string gitDir)
+    {
+        _path = Path.Combine(gitDir, "logs");
+    }
+
+    public void Init()
+    {
+        Directory.CreateDirectory(_path);
+        Directory.CreateDirectory(Path.Combine(_path, "refs"));
+        Directory.CreateDirectory(Path.Combine(_path, "refs", "heads"));
+    }
+
+    public void AppendToLog(string relativeLogPath, string oldHash, string newHash, string committer, string message)
+    {
+        string fullPath = Path.Combine(_path, relativeLogPath);
+        
+        // Исправляем ошибку: создаём директорию, только если она есть в пути
+        string? logDir = Path.GetDirectoryName(fullPath);
+        if (logDir != null)
+        {
+            Directory.CreateDirectory(logDir);
+        }
+
+        var now = DateTimeOffset.Now;
+        string timestamp = now.ToUnixTimeSeconds().ToString();
+        string timezone = now.Offset.ToString("hhmm");
+        
+        string logLine = $"{oldHash} {newHash} {committer} {timestamp} {timezone}\t{message}\n";
+        
+        File.AppendAllText(fullPath, logLine);
+    }
+}
+
 // ========================
 // BLOB
 // ========================
@@ -387,6 +424,7 @@ public class GitStore
     private readonly GitInfo_Dir _info;
     private readonly GitHooks_Dir _hooks;
     private readonly GitIndex_File _index;
+    private readonly GitLogs_Dir _logs;
 
     public GitStore(string workingDir = ".")
     {
@@ -400,6 +438,7 @@ public class GitStore
         _info = new GitInfo_Dir(_gitDir);
         _hooks = new GitHooks_Dir(_gitDir);
         _index = new GitIndex_File(_gitDir, _workingDir);
+        _logs = new GitLogs_Dir(_gitDir);
     }
 
     public void Init()
@@ -490,10 +529,33 @@ public class GitStore
         tree.Save();
 
         var author = GetCommitterFromConfig();
-        var commit = new GitCommit_Object(_gitDir, tree.Hash, null, author, message);
+        
+        // Определяем старый хеш (для первого коммита он будет нулевым)
+        string oldHeadHash = "0000000000000000000000000000000000000000";
+        string headFilePath = Path.Combine(_gitDir, "refs", "heads", "main");
+        if (File.Exists(headFilePath))
+        {
+            oldHeadHash = File.ReadAllText(headFilePath).Trim();
+        }
+
+        var commit = new GitCommit_Object(_gitDir, tree.Hash, oldHeadHash, author, message);
         commit.Save();
 
         _refs.UpdateBranch("main", commit.Hash);
+
+        // --- ДОБАВЛЯЕМ ЗАПИСЬ В ЛОГИ ---
+        // Создаём logs при первом коммите, если их еще нет
+        if (!Directory.Exists(_logs._path))
+        {
+            _logs.Init();
+        }
+
+        // Определяем сообщение для лога HEAD
+        string headMessage = File.Exists(headFilePath) ? $"commit: {message}" : $"commit (initial): {message}";
+
+        _logs.AppendToLog("HEAD", oldHeadHash, commit.Hash, author, headMessage);
+        _logs.AppendToLog("refs/heads/main", oldHeadHash, commit.Hash, author, message);
+        // -------------------------------------------------
 
         Console.WriteLine($"[{commit.Hash[..7]}] {message}");
         return commit.Hash;
